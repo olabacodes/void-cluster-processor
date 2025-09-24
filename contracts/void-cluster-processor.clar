@@ -452,3 +452,312 @@
   )
 )
 
+;; Advanced Permission Matrix System
+;; Implements granular role-based access control with hierarchical permissions
+
+(define-map role-definitions
+  { role-id: (string-ascii 32) }
+  {
+    role-name: (string-ascii 64),
+    permission-level: uint,
+    can-read: bool,
+    can-write: bool,
+    can-admin: bool,
+    can-delegate: bool,
+    max-nodes: uint
+  }
+)
+
+(define-map user-role-assignments
+  { user-address: principal, node-id: uint }
+  {
+    assigned-role: (string-ascii 32),
+    assigned-by: principal,
+    assignment-block: uint,
+    expiry-block: uint,
+    active: bool
+  }
+)
+
+(define-map permission-requests
+  { request-id: uint }
+  {
+    requester: principal,
+    node-id: uint,
+    requested-role: (string-ascii 32),
+    request-block: uint,
+    approved: bool,
+    processed: bool
+  }
+)
+
+(define-data-var request-counter uint u0)
+
+(define-public (assign-user-role
+  (user-address principal)
+  (node-id uint)
+  (role-id (string-ascii 32))
+  (duration-blocks uint)
+)
+  (let
+    (
+      (current-node (unwrap! (map-get? node-registry { node-id: node-id }) ERR_NODE_NOT_FOUND))
+      (role-data (unwrap! (map-get? role-definitions { role-id: role-id }) ERR_INVALID_CIPHER))
+      (expiry-block (+ block-height duration-blocks))
+      (existing-assignment (map-get? user-role-assignments { user-address: user-address, node-id: node-id }))
+    )
+    (asserts! (node-exists? node-id) ERR_NODE_NOT_FOUND)
+    (asserts! (is-eq (get owner-address current-node) tx-sender) ERR_ACCESS_DENIED)
+    (asserts! (> (len role-id) u0) ERR_INVALID_CIPHER)
+    (asserts! (<= (len role-id) u32) ERR_INVALID_CIPHER)
+    (asserts! (> duration-blocks u0) ERR_FREQUENCY_OUT_OF_BOUNDS)
+    (asserts! (<= duration-blocks u50000) ERR_FREQUENCY_OUT_OF_BOUNDS)
+    (asserts! (not (is-eq user-address tx-sender)) ERR_INVALID_OWNER)
+
+    ;; Check if user already has an active role for this node
+    (asserts! (or (is-none existing-assignment) 
+                  (not (get active (unwrap-panic existing-assignment)))) ERR_DUPLICATE_NODE)
+
+    (map-set user-role-assignments
+      { user-address: user-address, node-id: node-id }
+      {
+        assigned-role: role-id,
+        assigned-by: tx-sender,
+        assignment-block: block-height,
+        expiry-block: expiry-block,
+        active: true
+      }
+    )
+
+    ;; Grant corresponding access control entry
+    (map-set access-control-registry
+      { node-id: node-id, user-address: user-address }
+      { access-granted: true }
+    )
+
+    (ok true)
+  )
+)
+
+;; Emergency Node Lockdown System
+;; Provides immediate security response for compromised nodes
+
+(define-map emergency-lockdowns
+  { node-id: uint }
+  {
+    locked: bool,
+    lockdown-type: (string-ascii 32),
+    initiated-by: principal,
+    lockdown-block: uint,
+    reason: (string-ascii 128),
+    unlock-authorization: (optional principal)
+  }
+)
+
+(define-map lockdown-overrides
+  { node-id: uint, override-key: uint }
+  {
+    authorized-by: principal,
+    override-block: uint,
+    override-reason: (string-ascii 128),
+    approved: bool
+  }
+)
+
+(define-data-var override-key-counter uint u0)
+
+(define-public (emergency-lockdown-node
+  (node-id uint)
+  (lockdown-type (string-ascii 32))
+  (reason (string-ascii 128))
+)
+  (let
+    (
+      (current-node (unwrap! (map-get? node-registry { node-id: node-id }) ERR_NODE_NOT_FOUND))
+      (existing-lockdown (map-get? emergency-lockdowns { node-id: node-id }))
+    )
+    (asserts! (node-exists? node-id) ERR_NODE_NOT_FOUND)
+    (asserts! (or (is-eq (get owner-address current-node) tx-sender) 
+                  (is-eq tx-sender system-administrator)) ERR_ACCESS_DENIED)
+    (asserts! (is-none existing-lockdown) ERR_DUPLICATE_NODE)
+    (asserts! (> (len lockdown-type) u0) ERR_INVALID_CIPHER)
+    (asserts! (<= (len lockdown-type) u32) ERR_INVALID_CIPHER)
+    (asserts! (> (len reason) u0) ERR_INVALID_CIPHER)
+    (asserts! (<= (len reason) u128) ERR_INVALID_CIPHER)
+
+    (map-insert emergency-lockdowns
+      { node-id: node-id }
+      {
+        locked: true,
+        lockdown-type: lockdown-type,
+        initiated-by: tx-sender,
+        lockdown-block: block-height,
+        reason: reason,
+        unlock-authorization: none
+      }
+    )
+
+    ;; Revoke all existing access permissions during lockdown
+    (map-delete access-control-registry { node-id: node-id, user-address: (get owner-address current-node) })
+
+    (ok true)
+  )
+)
+
+;; Node Integrity Validation System
+;; Performs comprehensive security checks and validates node consistency
+
+(define-map node-security-scores
+  { node-id: uint }
+  {
+    integrity-score: uint,
+    last-validation: uint,
+    validation-count: uint,
+    security-level: (string-ascii 16),
+    flags: (list 5 (string-ascii 32))
+  }
+)
+
+(define-map security-violations
+  { node-id: uint, violation-id: uint }
+  {
+    violation-type: (string-ascii 32),
+    detected-block: uint,
+    severity: uint,
+    resolved: bool
+  }
+)
+
+(define-data-var violation-counter uint u0)
+
+;; Time-Based Access Control System
+;; Implements temporal restrictions for node access with automatic expiry
+
+(define-map time-based-access
+  { node-id: uint, user-address: principal }
+  {
+    access-granted: bool,
+    start-block: uint,
+    end-block: uint,
+    access-type: (string-ascii 16),
+    granted-by: principal
+  }
+)
+
+(define-map access-history
+  { node-id: uint, user-address: principal, timestamp: uint }
+  { action: (string-ascii 32), block-height: uint }
+)
+
+(define-data-var access-log-counter uint u0)
+
+(define-public (grant-time-based-access
+  (node-id uint)
+  (user-address principal)
+  (duration-blocks uint)
+  (access-type (string-ascii 16))
+)
+  (let
+    (
+      (current-node (unwrap! (map-get? node-registry { node-id: node-id }) ERR_NODE_NOT_FOUND))
+      (start-block block-height)
+      (end-block (+ block-height duration-blocks))
+      (log-id (+ (var-get access-log-counter) u1))
+    )
+    (asserts! (node-exists? node-id) ERR_NODE_NOT_FOUND)
+    (asserts! (is-eq (get owner-address current-node) tx-sender) ERR_ACCESS_DENIED)
+    (asserts! (> duration-blocks u0) ERR_FREQUENCY_OUT_OF_BOUNDS)
+    (asserts! (<= duration-blocks u100000) ERR_FREQUENCY_OUT_OF_BOUNDS)
+    (asserts! (> (len access-type) u0) ERR_INVALID_CIPHER)
+    (asserts! (<= (len access-type) u16) ERR_INVALID_CIPHER)
+    (asserts! (not (is-eq user-address tx-sender)) ERR_INVALID_OWNER)
+
+    (map-set time-based-access
+      { node-id: node-id, user-address: user-address }
+      {
+        access-granted: true,
+        start-block: start-block,
+        end-block: end-block,
+        access-type: access-type,
+        granted-by: tx-sender
+      }
+    )
+
+    (map-insert access-history
+      { node-id: node-id, user-address: user-address, timestamp: log-id }
+      { action: "access-granted", block-height: block-height }
+    )
+
+    (var-set access-log-counter log-id)
+    (ok true)
+  )
+)
+
+;; Multi-Signature Node Authorization System
+;; Requires multiple signatures for critical node operations
+
+(define-map multi-sig-proposals
+  { proposal-id: uint }
+  {
+    node-id: uint,
+    operation-type: (string-ascii 32),
+    proposer: principal,
+    required-signatures: uint,
+    current-signatures: uint,
+    expiry-block: uint,
+    executed: bool
+  }
+)
+
+(define-map multi-sig-votes
+  { proposal-id: uint, signer: principal }
+  { approved: bool, signature-block: uint }
+)
+
+(define-data-var proposal-counter uint u0)
+
+(define-public (create-multi-sig-proposal
+  (node-id uint)
+  (operation-type (string-ascii 32))
+  (required-signatures uint)
+  (expiry-blocks uint)
+)
+  (let
+    (
+      (new-proposal-id (+ (var-get proposal-counter) u1))
+      (current-node (unwrap! (map-get? node-registry { node-id: node-id }) ERR_NODE_NOT_FOUND))
+      (expiry-block (+ block-height expiry-blocks))
+    )
+    (asserts! (node-exists? node-id) ERR_NODE_NOT_FOUND)
+    (asserts! (is-eq (get owner-address current-node) tx-sender) ERR_ACCESS_DENIED)
+    (asserts! (> required-signatures u1) ERR_INVALID_CIPHER)
+    (asserts! (<= required-signatures u10) ERR_FREQUENCY_OUT_OF_BOUNDS)
+    (asserts! (> expiry-blocks u0) ERR_FREQUENCY_OUT_OF_BOUNDS)
+    (asserts! (<= expiry-blocks u1000) ERR_FREQUENCY_OUT_OF_BOUNDS)
+    (asserts! (> (len operation-type) u0) ERR_INVALID_CIPHER)
+    (asserts! (<= (len operation-type) u32) ERR_INVALID_CIPHER)
+
+    (map-insert multi-sig-proposals
+      { proposal-id: new-proposal-id }
+      {
+        node-id: node-id,
+        operation-type: operation-type,
+        proposer: tx-sender,
+        required-signatures: required-signatures,
+        current-signatures: u1,
+        expiry-block: expiry-block,
+        executed: false
+      }
+    )
+
+    (map-insert multi-sig-votes
+      { proposal-id: new-proposal-id, signer: tx-sender }
+      { approved: true, signature-block: block-height }
+    )
+
+    (var-set proposal-counter new-proposal-id)
+    (ok new-proposal-id)
+  )
+)
+
+
